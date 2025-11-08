@@ -38,7 +38,9 @@
 #define RX_MSG_OBJ_ID_4       4  //quality from sensor 2
 // ----- code for CAN end here -----
 
-#define DISTANCE 1    // assume robot is 1 meter away from wall
+#define DISTANCE 0.43    // assume robot is 1 meter away from wall
+#define RADIANS_PER_M  16.6  // wheel turns 16.6 radians per meter traveled
+
 
 
 // Interrupt Service Routines predefinition
@@ -57,9 +59,12 @@ float readEncRight(void);
 
 void setEPWM8A_RCServo(float angle);  //servo
 void setEPWM8B_RCServo(float angle);  //servo
+void setEPWM2A(float controleffort); //motor
+void setEPWM2B(float controleffort); //motor
 
 // Count variables
 uint32_t numTimer0calls = 0;
+uint32_t numTimer1calls = 0;
 uint32_t numSWIcalls = 0;
 extern uint32_t numRXA;
 uint16_t UARTPrint = 0;
@@ -85,6 +90,58 @@ float RightWheel;
 // added for servo control
 float h;
 float targetAngle;
+
+// added labview variables
+float printLV3 = 0;
+float printLV4 = 0;
+float printLV5 = 0;
+float printLV6 = 0;
+float printLV7 = 0;
+float printLV8 = 0;
+float x = 0;
+float y = 0;
+float bearing = 0;
+extern uint16_t NewLVData;
+extern float fromLVvalues[LVNUM_TOFROM_FLOATS];
+extern LVSendFloats_t DataToLabView;
+extern char LVsenddata[LVNUM_TOFROM_FLOATS*4+2];
+extern uint16_t newLinuxCommands;
+extern float LinuxCommands[CMDNUM_FROM_FLOATS];
+
+// added PI control variables for driving the robot
+float LeftWheel = 0.0;
+float RightWheel = 0.0;
+
+float Vref = 0;
+
+float uLeft = 5.0;
+float uRight = 5.0;
+float PosLeft_K = 0.0;
+float PosLeft_K_1 = 0.0;
+float PosRight_K = 0.0;
+float PosRight_K_1 = 0.0;
+float VLeftK = 0.0;
+float VRightK = 0.0;
+float distRight = 0.0;
+float distLeft = 0.0;
+
+float KpLeft = 3.0;
+float KiLeft = 25.0;
+float eKLeft = 0.0;
+float eK_1Left = 0.0;
+float IKLeft = 0.0;
+float IK_1Left = 0.0;
+
+float KpRight = 3.0;
+float KiRight = 25.0;
+float eKRight = 0.0;
+float eK_1Right = 0.0;
+float IKRight = 0.0;
+float IK_1Right = 0.0;
+
+float eturn = 0.0;
+float KPturn = 3.0;
+float turn = 0.0;
 
 int32_t SpibNumCalls = 0;
 
@@ -422,6 +479,26 @@ void main(void)
 
     init_eQEPs();
 
+    // EPwm2Regs
+    EPwm2Regs.TBCTL.bit.FREE_SOFT = 2;
+    EPwm2Regs.TBCTL.bit.CTRMODE = 0;
+    EPwm2Regs.TBCTL.bit.CLKDIV = 0;
+    EPwm2Regs.TBCTL.bit.PHSEN = 0;
+    EPwm2Regs.TBCTR = 0;   // start the timer at 0  - yuan41 and jfirst2
+    EPwm2Regs.TBPRD = 2500;
+    EPwm2Regs.CMPA.bit.CMPA = 1250; // initialize  the duty cycle   - yuan41 and jfirst2
+    EPwm2Regs.CMPB.bit.CMPB = 1250; // initialize the duty cycle   - yuan41 and jfirst2
+    //setEPWM2A(5);
+    //setEPWM2B(5);
+    EPwm2Regs.AQCTLA.bit.CAU = 1;
+    EPwm2Regs.AQCTLA.bit.ZRO = 2;
+    EPwm2Regs.AQCTLB.bit.CBU = 1;
+    EPwm2Regs.AQCTLB.bit.ZRO = 2;
+    EPwm2Regs.TBPHS.bit.TBPHS = 0;
+
+    GPIO_SetupPinMux(2, GPIO_MUX_CPU1, 1);  // changed
+    GPIO_SetupPinMux(3, GPIO_MUX_CPU1, 1);  // changed
+
     // Enable CPU int1 which is connected to CPU-Timer 0, CPU int13
     // which is connected to CPU-Timer 1, and CPU int 14, which is connected
     // to CPU-Timer 2:  int 12 is for the SWI.  
@@ -594,7 +671,7 @@ __interrupt void SWI_isr(void) {
 
 
     numSWIcalls++;
-    
+
     DINT;
 
 }
@@ -606,9 +683,9 @@ __interrupt void cpu_timer0_isr(void)
 
     numTimer0calls++;
 
-//    if ((numTimer0calls%50) == 0) {
-//        PieCtrlRegs.PIEIFR12.bit.INTx9 = 1;  // Manually cause the interrupt for the SWI
-//    }
+    //    if ((numTimer0calls%50) == 0) {
+    //        PieCtrlRegs.PIEIFR12.bit.INTx9 = 1;  // Manually cause the interrupt for the SWI
+    //    }
 
     if ((numTimer0calls%250) == 0) {
         displayLEDletter(LEDdisplaynum);
@@ -655,22 +732,98 @@ __interrupt void cpu_timer1_isr(void)
 {
 
     CpuTimer1.InterruptCount++;
+    numTimer1calls++;
+
+    if (NewLVData == 1) {
+        NewLVData = 0;
+        Vref = fromLVvalues[0];
+        turn = fromwvalues[1];
+        printLV3 = fromLVvalues[2];
+        printLV4 = fromLVvalues[3];
+        printLV5 = fromLVvalues[4];
+        printLV6 = fromLVvalues[5];
+        printLV7 = fromLVvalues[6];
+        printLV8 = fromLVvalues[7];
+    }
+    if((numTimer1calls%62) == 0) { // change to the counter variable of you selected 4ms. timer
+        DataToLabView.floatData[0] = x;
+        DataToLabView.floatData[1] = y;
+        DataToLabView.floatData[2] = bearing;
+        DataToLabView.floatData[3] = 2.0*((float)numTimer0calls)*.001;
+        DataToLabView.floatData[4] = 3.0*((float)numTimer0calls)*.001;
+        DataToLabView.floatData[5] = (float)numTimer0calls;
+        DataToLabView.floatData[6] = (float)numTimer0calls*4.0;
+        DataToLabView.floatData[7] = (float)numTimer0calls*5.0;
+        LVsenddata[0] = '*'; // header for LVdata
+        LVsenddata[1] = '$';
+        for (int i=0;i<LVNUM_TOFROM_FLOATS*4;i++) {
+            if (i%2==0) {
+                LVsenddata[i+2] = DataToLabView.rawData[i/2] & 0xFF;
+            } else {
+                LVsenddata[i+2] = (DataToLabView.rawData[i/2]>>8) & 0xFF;
+            }
+        }
+        serial_sendSCID(&SerialD, LVsenddata, 4*LVNUM_TOFROM_FLOATS + 2);
+    }
 
     LeftWheel = -readEncLeft();
     RightWheel = readEncRight();
 
-    if ((CpuTimer1.InterruptCount % 125) == 0){
-        h = (LeftWheel + RightWheel)/2.0; //just average them for now just because
+    distLeft = LeftWheel/RADIANS_PER_M;
+    distRight = RightWheel/RADIANS_PER_M;
+
+    PosLeft_K = distLeft;
+    PosRight_K = distRight;
+
+    VLeftK = (PosLeft_K - PosLeft_K_1)/0.004;
+    VRightK = (PosRight_K - PosRight_K_1)/0.004;
+
+    // steering controller
+    eturn = turn + VLeftK - VRightK;
+
+    // control algorithm
+
+    // left wheel
+    eKLeft = Vref - VLeftK - (KPturn*eturn);
+    IKLeft = IK_1Left + 0.004*((eKLeft + eK_1Left)/2.0);
+    uLeft = KpLeft * eKLeft + KiLeft * IKLeft;
+    if ((uLeft >= 10.0) || uLeft <= -10.0) {
+        IKLeft = IK_1Left * 0.95;
+    }
+    uLeft = KpLeft * eKLeft + KiLeft * IKLeft;
+
+    // right wheel
+    eKRight = Vref - VRightK + (KPturn*eturn);
+    IKRight = IK_1Right + 0.004*((eKRight + eK_1Right)/2.0);
+    uRight = KpRight * eKRight + KiRight * IKRight;
+    if ((uRight >= 10.0) || uRight <= -10.0) {
+        IKRight = IK_1Right * 0.95;
+    }
+    uRight = KpRight * eKRight + KiRight * IKRight;
+
+
+    // save old variables
+    PosLeft_K_1 = PosLeft_K;
+    PosRight_K_1 = PosRight_K;
+    IK_1Left = IKLeft;
+    IK_1Right = IKRight;
+
+    setEPWM2A(uRight);
+    setEPWM2B(uLeft);
+
+
+    if ((CpuTimer1.InterruptCount % 25) == 0){
+        h = (distLeft + distRight)/2.0; //just average them for now just because
         targetAngle = atan(h/DISTANCE); //radians
         setEPWM8A_RCServo(targetAngle * (180.0/PI)); //convert to degrees
     }
 
     // move servo A once every 1 second (this interrupt is called every 4 millisecond)
-//    if ((CpuTimer1.InterruptCount % 500 == 0)) {
-//        setEPWM8A_RCServo(10);
-//    } else if ((CpuTimer1.InterruptCount % 250 == 0)) {
-//        setEPWM8A_RCServo(-10);
-//    }
+    //    if ((CpuTimer1.InterruptCount % 500 == 0)) {
+    //        setEPWM8A_RCServo(10);
+    //    } else if ((CpuTimer1.InterruptCount % 250 == 0)) {
+    //        setEPWM8A_RCServo(-10);
+    //    }
 
 }
 
@@ -683,7 +836,7 @@ __interrupt void cpu_timer2_isr(void)
     CpuTimer2.InterruptCount++;
 
     if ((CpuTimer2.InterruptCount % 10) == 0) {
-//      UARTPrint = 1;
+        //      UARTPrint = 1;
     }
 }
 
@@ -1245,4 +1398,23 @@ void setEPWM8B_RCServo(float angle){
         angle = -90.0;
     }
     EPwm8Regs.CMPB.bit.CMPB = 625*((angle+90)/22.5 + 4);  // converts an angle in degrees into a CMPA value (between 0 and ??)
+}
+
+void setEPWM2A(float controleffort) {
+    if (controleffort > 10.0) {
+        controleffort = 10.0;
+    } else if (controleffort < -10.0) {
+        controleffort = -10.0;
+    }
+
+    EPwm2Regs.CMPA.bit.CMPA = (controleffort + 10.0) * 125.0;
+}
+void setEPWM2B(float controleffort) {
+    if (controleffort > 10.0) {
+        controleffort = 10.0;
+    } else if (controleffort < -10.0) {
+        controleffort = -10.0;
+    }
+
+    EPwm2Regs.CMPB.bit.CMPB = 2500.0 - ((controleffort + 10.0) * 125.0);
 }
